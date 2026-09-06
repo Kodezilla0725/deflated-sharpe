@@ -10,6 +10,19 @@ it, which is why the plain constructor guards against it.
 
 Kurtosis is non-excess (Normal = 3.0), matching the (gamma_4 - 1)/4 term.
 scipy defaults to Fisher, so `from_returns` passes fisher=False.
+
+All four moments are the plain population estimators (ddof=0, bias=True). One
+convention, chosen because gamma_3 and gamma_4 in Eq. (2) are population
+moments; the only sample correction in the statistic is the sqrt(T - 1), and
+putting a second one in sigma would be inconsistent with the derivation. At
+any T where the difference is visible the statistic is not usable anyway.
+
+That choice is coupled to the Pearson guard below and is not free. Biased
+sample moments satisfy kurtosis >= skew^2 + 1 identically, so `from_returns`
+can never trip the guard; the equality is exact for n=2 samples, which is why
+the guard carries a 1e-9 tolerance rather than none. Unbiased moments do NOT
+satisfy it: over 20,000 small fat-tailed samples the slack reached -4.0, so
+mixing the conventions would make the guard reject real data.
 """
 
 import math
@@ -34,10 +47,14 @@ class SharpeStats:
     def __post_init__(self):
         if not self.n_obs > 1:
             raise ValueError(f"n_obs must exceed 1, got {self.n_obs}")
-        if self.kurtosis < 1:
+        # Pearson's inequality, the general form. `kurtosis < 1` is only this
+        # at zero skew, and lets (skew=-3, kurtosis=2) through to a PSR of 1.0.
+        if self.kurtosis < self.skew**2 + 1 - 1e-9:
             raise ValueError(
-                f"kurtosis is non-excess and cannot fall below 1, got "
-                f"{self.kurtosis}; a Normal is 3.0, so add 3 if that was excess"
+                f"kurtosis {self.kurtosis} is below skew^2 + 1 = "
+                f"{self.skew**2 + 1}; no distribution has these moments. "
+                f"Kurtosis here is non-excess, so a Normal is 3.0 - add 3 if "
+                f"you passed an excess kurtosis."
             )
         # A per-period SR above 1.0 is 15.8 annualized at daily frequency.
         # Skipped at ppy=1, where 2.5 is legitimate.
@@ -61,7 +78,7 @@ class SharpeStats:
         r = np.asarray(returns, dtype=float).ravel()
         if r.size < 2 or not np.all(np.isfinite(r)):
             raise ValueError("need at least 2 finite observations")
-        sd = r.std(ddof=1)
+        sd = r.std()
         # Relative, not `sd <= 0`: a constant series leaves a ~1e-19 residue
         # rather than an exact zero, which sails through an absolute check and
         # gives a Sharpe ratio of order 1e15.
@@ -88,10 +105,17 @@ def _se_factor(sr, skew, kurtosis):
     the standard error and shrinking PSR. That direction is the point.
     """
     radicand = 1 - skew * sr + (kurtosis - 1) / 4 * sr**2
+    # As a quadratic in sr this is minimised at sr* = 2*g3/(g4 - 1), where it
+    # equals (g4 - 1 - g3^2)/(g4 - 1) - the Pearson slack. So once the
+    # constructor enforces Pearson it can never go strictly negative. It can
+    # still hit exactly zero, for moments sitting ON the boundary evaluated at
+    # sr*: the paper's own g3=-3, g4=10 does this at sr=-2/3. That is a real
+    # division by zero, not an impossible-moments case, hence the guard stays.
     if radicand <= 0:
         raise ValueError(
-            f"non-Normality correction is non-positive ({radicand:.4g}) for "
-            f"sr={sr}, skew={skew}, kurtosis={kurtosis}"
+            f"standard error vanishes: skew={skew}, kurtosis={kurtosis} sit on "
+            f"the Pearson boundary and sr={sr} is exactly 2*skew/(kurtosis-1), "
+            f"where the non-Normality correction is degenerate"
         )
     return math.sqrt(radicand)
 
@@ -107,18 +131,26 @@ def probabilistic_sharpe_ratio(stats, benchmark_sr=0.0):
     return float(norm.cdf(z / _se_factor(stats.sr, stats.skew, stats.kurtosis)))
 
 
-def min_track_record_length(
-    sr, skew=0.0, kurtosis=3.0, benchmark_sr=0.0, confidence=0.95
-):
+def min_track_record_length(stats, benchmark_sr=0.0, confidence=0.95):
     """Observations needed before PSR reaches `confidence`. Eq. (2) solved for T.
 
-    All Sharpe ratios per observation. Returns a float; ceil it if you want
-    whole periods. Undefined unless `sr` already exceeds `benchmark_sr`: extra
-    data never rescues a strategy that does not beat the threshold.
+    Takes a `SharpeStats` rather than loose floats so units are established in
+    exactly one place. On loose floats this function had no frequency guard at
+    all: `min_track_record_length(2.5)` returned 2.79, quietly implying three
+    days of data from an annualised Sharpe.
+
+    `stats.n_obs` is ignored - this returns the T you would need, not the T you
+    have. Returns a float; ceil it for whole periods. Undefined unless
+    `stats.sr` exceeds `benchmark_sr`, since more data never rescues a strategy
+    that does not clear the threshold.
     """
     if not 0 < confidence < 1:
         raise ValueError(f"confidence must lie in (0, 1), got {confidence}")
-    if sr <= benchmark_sr:
-        raise ValueError(f"sr ({sr}) must exceed benchmark_sr ({benchmark_sr})")
-    edge = (sr - benchmark_sr) / _se_factor(sr, skew, kurtosis)
+    if stats.sr <= benchmark_sr:
+        raise ValueError(
+            f"sr ({stats.sr}) must exceed benchmark_sr ({benchmark_sr})"
+        )
+    edge = (stats.sr - benchmark_sr) / _se_factor(
+        stats.sr, stats.skew, stats.kurtosis
+    )
     return 1 + (norm.ppf(confidence) / edge) ** 2

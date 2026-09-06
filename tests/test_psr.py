@@ -2,6 +2,8 @@
 
 import math
 
+import dataclasses
+
 import numpy as np
 import pytest
 from scipy.stats import norm
@@ -10,9 +12,10 @@ from src.psr import SharpeStats, min_track_record_length, probabilistic_sharpe_r
 
 # Bailey & Lopez de Prado (2014) numerical example, pp. 9-10. SR0 values come
 # from Eq. (1) with V[{SR_n}] = 1/2 annualised, hardcoded so this file has no
-# dependency on dsr.py.
+# dependency on dsr.py. test_dsr.py asserts dsr.expected_max_sharpe reproduces
+# them, which is what keeps them from silently drifting.
 PAPER = dict(sr_annual=2.5, periods_per_year=250, n_obs=1250, skew=-3.0, kurtosis=10.0)
-SR0_N100, SR0_N46, SR0_N88_NORMAL = 0.11318286, 0.10035316, 0.11114255
+SR0_N100, SR0_N46, SR0_N88_NORMAL = 0.11317200, 0.10036237, 0.11114576
 
 
 def stats(sr=0.1, n_obs=1250, ppy=250, skew=0.0, kurtosis=3.0):
@@ -75,18 +78,25 @@ def test_moment_corrections_move_the_right_way():
 @pytest.mark.parametrize("skew,kurt", [(0.0, 3.0), (-1.2, 9.0)])
 def test_min_trl_roundtrips_through_psr(confidence, skew, kurt):
     """Same formula solved for T, so it must invert exactly."""
-    t = min_track_record_length(0.1, skew, kurt, confidence=confidence)
-    at_t = stats(sr=0.1, n_obs=t, skew=skew, kurtosis=kurt)
+    s = stats(sr=0.1, skew=skew, kurtosis=kurt)
+    t = min_track_record_length(s, confidence=confidence)
+    at_t = dataclasses.replace(s, n_obs=t)
     assert probabilistic_sharpe_ratio(at_t) == pytest.approx(confidence, rel=1e-9)
 
 
 def test_min_trl_grows_with_negative_skew():
-    assert min_track_record_length(0.1, skew=-1.2) > min_track_record_length(0.1)
+    assert min_track_record_length(stats(skew=-1.2)) > min_track_record_length(stats())
 
 
 def test_min_trl_rejects_sr_below_benchmark():
     with pytest.raises(ValueError, match="benchmark"):
-        min_track_record_length(0.05, benchmark_sr=0.05)
+        min_track_record_length(stats(sr=0.05), benchmark_sr=0.05)
+
+
+def test_min_trl_cannot_be_reached_with_an_annualised_sharpe():
+    """Loose floats let min_track_record_length(2.5) return 2.79 observations."""
+    with pytest.raises(ValueError, match="annualized"):
+        min_track_record_length(SharpeStats(2.5, 1250, 250))
 
 
 # --- frequency and moment conventions -------------------------------------- #
@@ -119,8 +129,42 @@ def test_from_returns_kurtosis_is_non_excess_and_sharpe_is_right():
 
 
 def test_excess_kurtosis_passed_by_mistake_is_rejected():
-    with pytest.raises(ValueError, match="non-excess"):
+    with pytest.raises(ValueError, match="excess"):
         stats(kurtosis=0.0)
+
+
+def test_pearson_inequality_general_form():
+    """`kurtosis < 1` is Pearson at zero skew only, and let this through."""
+    with pytest.raises(ValueError, match="skew"):
+        stats(sr=0.5, skew=-3.0, kurtosis=2.0)
+
+
+def test_moments_on_the_pearson_boundary_still_build():
+    """The paper's own skew=-3, kurtosis=10 sits exactly on skew^2 + 1."""
+    assert stats(skew=-3.0, kurtosis=10.0).kurtosis == 10.0
+    assert stats(skew=-1.2, kurtosis=2.44).kurtosis == 2.44
+
+
+def test_moments_strictly_inside_the_pearson_boundary_build():
+    assert stats(skew=-1.2, kurtosis=9.0).kurtosis == 9.0
+    assert stats(skew=0.5, kurtosis=4.0).kurtosis == 4.0
+
+
+def test_real_data_never_trips_the_pearson_guard():
+    """Biased moments satisfy the inequality identically, which is why the
+    ddof=0 / bias=True convention and this guard cannot be chosen separately."""
+    # ppy=1 to isolate the Pearson guard: at 3 observations the sample Sharpe
+    # is legitimately huge and would trip the frequency guard first.
+    rng = np.random.default_rng(7)
+    for _ in range(300):
+        r = rng.standard_t(2.5, rng.integers(3, 40))
+        SharpeStats.from_returns(r, 1)
+
+
+def test_degenerate_standard_error_is_caught():
+    """Boundary moments at sr = 2*skew/(kurtosis-1) zero the radicand."""
+    with pytest.raises(ValueError, match="vanishes"):
+        probabilistic_sharpe_ratio(stats(sr=-2 / 3, skew=-3.0, kurtosis=10.0))
 
 
 def test_from_returns_rejects_zero_variance():
