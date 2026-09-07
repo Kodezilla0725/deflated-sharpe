@@ -1,3 +1,4 @@
+![tests](https://github.com/Kodezilla0725/deflated-sharpe/actions/workflows/test.yml/badge.svg)
 # Deflated Sharpe Ratio and Probability of Backtest Overfitting
 
 Implementations of two tests for whether a backtest survived a search or merely
