@@ -3,6 +3,8 @@
 import math
 import warnings
 
+import numpy as np
+
 import pytest
 
 from src.dsr import (
@@ -13,7 +15,9 @@ from src.dsr import (
 )
 from src.psr import SharpeStats, probabilistic_sharpe_ratio
 
-# Bailey & Lopez de Prado (2014), numerical example pp. 9-10.
+# Bailey & Lopez de Prado (2014), numerical example pp. 9-10. Parameters are
+# stated verbatim on p. 9: "N = 100, V[{SR_n}] = 1/2, T=1250, g3 = -3, g4 = 10".
+# p. 10 prints the threshold as sqrt(1/(2*250))*(...) ~ 0.1132 and DSR = 0.9004.
 PAPER = dict(sr_annual=2.5, periods_per_year=250, n_obs=1250, skew=-3.0, kurtosis=10.0)
 PPY = 250
 VAR_TRIAL_SR_ANNUAL = 0.5
@@ -54,20 +58,25 @@ def test_reproduces_the_thresholds_hardcoded_in_test_psr(n_trials, expected_sr0)
     )
 
 
+def test_threshold_matches_the_printed_value():
+    """p. 10 gives SR0 ~ 0.1132 to four decimals."""
+    assert round(quiet_emax(100, VAR_TRIAL_SR), 4) == 0.1132
+
+
 def test_paper_example_end_to_end():
     """The full pipeline, from trial count to the published DSR (p. 10)."""
     s = paper_stats()
-    assert deflated_sharpe_ratio(s, trial_set(100)) == pytest.approx(0.90, abs=5e-4)
-    assert quiet_dsr(s, 46) == pytest.approx(0.9505, abs=5e-4)
+    assert deflated_sharpe_ratio(s, trial_set(100)) == pytest.approx(0.9004, abs=1e-4)
+    assert quiet_dsr(s, 46) == pytest.approx(0.9505, abs=1e-4)
 
 
 def test_normal_returns_buy_tolerance_for_more_trials():
     """Non-Normality alone roughly halves the tolerable search: 88 vs 46."""
     normal = SharpeStats.from_annualized(2.5, PPY, 1250)
     assert deflated_sharpe_ratio(normal, trial_set(88)) == pytest.approx(
-        0.9505, abs=5e-4
+        0.9505, abs=1e-4
     )
-    assert quiet_dsr(paper_stats(), 46) == pytest.approx(0.9505, abs=5e-4)
+    assert quiet_dsr(paper_stats(), 46) == pytest.approx(0.9505, abs=1e-4)
 
 
 # --- Eq. (1) structure ----------------------------------------------------- #
@@ -183,10 +192,68 @@ def test_accepts_fractional_trial_counts():
     assert quiet_emax(80.9, 1.0) == pytest.approx(quiet_emax(81, 1.0), abs=0.01)
 
 
-def test_floors_the_negative_correction_near_one_trial():
-    """Eq. (1) goes negative below N=1.2836; the max cannot be below the mean."""
-    assert quiet_emax(1.1, 1.0, mean_trial_sr=0.3) == 0.3
-    assert quiet_emax(1.5, 1.0) > 0
+def test_exact_branch_below_the_crossover():
+    """Eq. (1) understates below N=2.775 and goes negative below 1.284.
+
+    Flooring at the mean there understated the threshold by up to 0.21, which
+    RAISES DSR - permissive in the regime the tool exists to police.
+    """
+    assert quiet_emax(1.1, 1.0) == pytest.approx(0.0848, abs=1e-3)
+    assert quiet_emax(2.0, 1.0) == pytest.approx(0.5642, abs=1e-3)
+    assert quiet_emax(2.98, 1.0) == pytest.approx(0.8419, abs=1e-3)
+
+
+def test_exact_branch_matches_closed_forms():
+    """E[max] of 2 and 3 standard Normals is 1/sqrt(pi) and 3/(2*sqrt(pi)).
+
+    Analytic rather than Monte Carlo: at 300k reps the MC standard error is
+    ~0.0016, which is the same size as the quantity under test.
+    """
+    from src.dsr import _exact_expected_max_z
+
+    assert _exact_expected_max_z(2) == pytest.approx(1 / math.sqrt(math.pi), abs=1e-9)
+    assert _exact_expected_max_z(3) == pytest.approx(
+        3 / (2 * math.sqrt(math.pi)), abs=1e-9
+    )
+    # N=2 routes to the exact branch; N=3 is on the Eq. (1) side of the seam.
+    assert quiet_emax(2, 1.0) == pytest.approx(1 / math.sqrt(math.pi), abs=1e-9)
+    assert quiet_emax(3, 1.0) > _exact_expected_max_z(3)
+
+
+def test_exact_branch_still_monotone_and_positive():
+    vals = [quiet_emax(n, 1.0) for n in (1.0, 1.1, 1.5, 2.0, 2.5, 2.99)]
+    assert vals == sorted(vals) and all(v >= 0 for v in vals)
+
+
+def test_crossover_seam_is_small():
+    """Branch disagreement must stay well under Eq. (1)'s own error."""
+    jump = abs(quiet_emax(3.0, 1.0) - quiet_emax(2.999, 1.0))
+    assert jump < 0.01
+
+
+def test_no_warning_on_the_exact_branch():
+    """The small-N warning describes Eq. (1). Below the crossover it is not
+    used, so nothing overestimates and the warning must not fire - M=100 at
+    rho=0.98 gives N=2.98, which is the case that motivates the branch."""
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        expected_max_sharpe(2.98, 1.0)
+        expected_max_sharpe(1.5, 1.0)
+
+
+def test_warning_still_fires_on_the_approximate_branch():
+    with pytest.warns(UserWarning, match="below 50"):
+        expected_max_sharpe(3.0, 1.0)
+    with pytest.warns(UserWarning, match="below 50"):
+        expected_max_sharpe(20, 1.0)
+
+
+def test_eq1_is_used_above_the_crossover():
+    """The paper's figures depend on Eq. (1), not the exact form."""
+    from src.dsr import _exact_expected_max_z
+
+    assert quiet_emax(100, 1.0) == pytest.approx(2.53060289, abs=1e-8)
+    assert quiet_emax(100, 1.0) > _exact_expected_max_z(100)
 
 
 def test_rejects_non_positive_trial_counts():

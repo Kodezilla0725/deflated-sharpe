@@ -11,7 +11,7 @@ asks whether the configuration that wins in-sample keeps winning out-of-sample,
 across every symmetric split of the data. Neither subsumes the other, and a
 strategy that clears one and fails the other is worth a second look.
 
-Three departures from the paper as printed, each verified rather than assumed:
+Five departures from the paper as printed, each verified rather than assumed:
 
 1. It states that S=16 yields 12,780 combinations (pp. 11, 22). C(16,8) is
    12,870. The paper's own Eq. (2.3) product form gives 12,870, and its S=24
@@ -23,8 +23,19 @@ Three departures from the paper as printed, each verified rather than assumed:
    rank-based estimator, which is what phi computes, so median it is.
 4. p. 22 says the logits approximate the standard NORMAL when the backtest is
    informationless. The logit of a uniform is standard LOGISTIC, whose standard
-   deviation is pi/sqrt(3) = 1.81. Only matters if you compare an observed
-   spread against a Normal baseline, which would look far too wide.
+   deviation is pi/sqrt(3) = 1.81, not 1. Measured over 8 informationless seeds
+   at T=480, N=50, S=12: 1.583 +- 0.248, range 1.234 to 2.030. So it sits below
+   the logistic on average, discrete ranks truncating both tails, but by well
+   under a standard deviation - and comfortably above the Normal. The claim
+   that survives is that the spread is far wider than Normal.
+5. Definition 2.2 (p. 10) writes PBO as Prob[rbar_n < N/2]. The rank is uniform
+   on 1..N under the null, so that expression gives 0.400 at N=10, 0.480 at
+   N=50 and 0.490 at N=100 - never 0.5, which is the correct answer when the
+   IS winner carries no information. phi as computed here tests
+   rbar/(N+1) < 1/2, equivalently rbar < (N+1)/2, and gives 0.5 at every N.
+   The two differ by exactly one rank at even N and agree at odd N, so this is
+   an off-by-one against the paper's own logit construction rather than a
+   different definition.
 
 And one claim that does not survive measurement. p. 22 puts the standard error
 of phi at under 0.0045 for S=16, from sigma = sqrt(p(1-p)/n) with n the number
@@ -63,10 +74,16 @@ def sharpe_columns(block):
     ranks, which any positive-scaling choice leaves alone.
     """
     sd = block.std(axis=0)
-    if np.any(sd <= 1e-12 * np.abs(block).max()):
+    # Per column, not against the block maximum. A global scale would reject a
+    # genuinely varying trial whenever some other trial is orders of magnitude
+    # larger: columns with standard deviations of 9.6e5 and 1.0e-9, both real,
+    # had the second flagged as constant.
+    dead = sd <= 1e-12 * np.abs(block).max(axis=0)
+    if np.any(dead):
         raise ValueError(
-            "a trial has zero variance within a split; its Sharpe ratio is "
-            "undefined. Drop constant columns before running CSCV."
+            f"trials {list(np.flatnonzero(dead))} have zero variance within a "
+            f"split; their Sharpe ratios are undefined. Drop constant columns "
+            f"before running CSCV."
         )
     return block.mean(axis=0) / sd
 
@@ -78,6 +95,7 @@ class CSCVResult:
     logits: np.ndarray
     perf_is: np.ndarray
     perf_oos: np.ndarray
+    perf_oos_all: np.ndarray
     best_trial: np.ndarray
     n_trials: int
     n_splits: int
@@ -116,6 +134,14 @@ class CSCVResult:
     @property
     def n_combinations(self):
         return len(self.logits)
+
+    # `perf_oos_all` is the full (combinations x N) out-of-sample surface, kept
+    # because stochastic dominance (Section 3.3, the fourth statistic) compares
+    # the distribution of the selected strategy against the distribution of all
+    # trials, and cannot be recovered from the winner's column alone. Storing it
+    # costs n_combinations * N * 8 bytes: 10 MB at the default S=16 with N=100,
+    # 41 MB at N=400. At S=24 it is 2.2 GB, but that configuration is 210 times
+    # the combinations and already impractical on runtime alone.
 
 
 def cscv(
@@ -181,7 +207,7 @@ def cscv(
     blocks = np.arange(n_obs).reshape(n_splits, n_obs // n_splits)
     half = n_splits // 2
 
-    logits, perf_is, perf_oos, best = [], [], [], []
+    logits, perf_is, perf_oos, perf_oos_all, best = [], [], [], [], []
     for combo in combinations(range(n_splits), half):
         mask = np.zeros(n_splits, dtype=bool)
         mask[list(combo)] = True
@@ -202,12 +228,14 @@ def cscv(
         logits.append(math.log(omega / (1 - omega)))
         perf_is.append(r_is[n_star] * scale)
         perf_oos.append(r_oos[n_star] * scale)
+        perf_oos_all.append(r_oos * scale)
         best.append(n_star)
 
     return CSCVResult(
         logits=np.array(logits),
         perf_is=np.array(perf_is),
         perf_oos=np.array(perf_oos),
+        perf_oos_all=np.array(perf_oos_all),
         best_trial=np.array(best),
         n_trials=n_trials,
         n_splits=n_splits,

@@ -84,6 +84,15 @@ def test_independent_trials_show_near_zero_correlation():
     )
 
 
+def test_scale_guard_is_per_column():
+    """Same bug as pbo.sharpe_columns had: a global max rejects real columns."""
+    rng = np.random.default_rng(0)
+    X = np.column_stack(
+        [rng.standard_normal(300) * 1e6, rng.standard_normal(300) * 1e-9]
+    )
+    assert abs(average_correlation(X)) < 0.2
+
+
 def test_rejects_a_constant_trial():
     X = equicorrelated(200, 5, 0.5)
     X[:, 2] = 0.01

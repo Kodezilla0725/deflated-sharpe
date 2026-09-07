@@ -161,6 +161,31 @@ def test_real_data_never_trips_the_pearson_guard():
         SharpeStats.from_returns(r, 1)
 
 
+def test_unbiased_moments_would_break_the_pearson_guard():
+    """The other half of the coupling, which is why the convention is not free.
+
+    Biased moments satisfy kurtosis >= skew^2 + 1 identically. Unbiased ones do
+    not: on small fat-tailed samples the slack goes several units negative, so
+    mixing conventions would make the guard reject ordinary data.
+    """
+    from scipy.stats import kurtosis, skew
+
+    rng = np.random.default_rng(11)
+    worst_biased = worst_unbiased = np.inf
+    for _ in range(5000):
+        r = rng.standard_t(2.5, rng.integers(4, 12))
+        for bias, current in ((True, "b"), (False, "u")):
+            g3 = skew(r, bias=bias)
+            g4 = kurtosis(r, fisher=False, bias=bias)
+            slack = g4 - g3**2 - 1
+            if current == "b":
+                worst_biased = min(worst_biased, slack)
+            else:
+                worst_unbiased = min(worst_unbiased, slack)
+    assert worst_biased > -1e-9, "biased moments satisfy Pearson identically"
+    assert worst_unbiased < -1.0, "unbiased moments violate it substantially"
+
+
 def test_degenerate_standard_error_is_caught():
     """Boundary moments at sr = 2*skew/(kurtosis-1) zero the radicand."""
     with pytest.raises(ValueError, match="vanishes"):

@@ -12,20 +12,48 @@ import math
 import warnings
 from dataclasses import dataclass
 
+import numpy as np
+from scipy.integrate import quad
 from scipy.stats import norm
 
 from .psr import probabilistic_sharpe_ratio
 
 EULER_MASCHERONI = 0.5772156649015329
 
-# Below this, Appendix 2 (pp. 18-19) shows the approximation drifting: it
-# overestimates the maximum by up to ~0.05 for a variance-1 process, falling to
-# ~0.006 by 1000 trials. The proof assumes N >> 1.
+# Below this, Appendix 2 (pp. 18-19) shows the approximation drifting, and the
+# proof assumes N >> 1. Measured against the exact order statistic, Eq. (1)
+# overestimates by +0.036 at N=10, +0.023 at N=100 and +0.014 at N=1000.
 SMALL_N_TRIALS = 50
 
-# Eq. (1) returns a NEGATIVE correction below N = 1.2836, which would put the
-# expected maximum below the mean. Impossible, so it is floored.
-_GUMBEL_FLOOR_N = 1.2836
+# Below this, the exact order statistic is integrated instead of applying
+# Eq. (1). Not the crossover itself: the sign change is measured at N = 2.7752,
+# and by N = 1.2836 Eq. (1) has gone negative outright, which would put the
+# expected maximum below the mean. Rounded up to a whole number because the
+# integral is exact on both sides, so this constant only decides where to stop
+# using the cheaper approximation - a margin above the measured crossover costs
+# one quadrature call and nothing else.
+EXACT_BRANCH_BELOW = 3.0
+
+
+def _exact_expected_max_z(n_trials):
+    """E[max] of n_trials standard Normals, by direct integration.
+
+    The density of the maximum is n*phi(z)*Phi(z)^(n-1), which integrates to 1
+    for any real n > 0, so this is the continuous extension of the order
+    statistic and is exact at integers. Checked against the closed forms
+    1/sqrt(pi) at n=2 and 3/(2*sqrt(pi)) at n=3, to 1e-9. Not against Monte
+    Carlo: at 300k replications the sampling error is around 0.0016, the same
+    size as the quantity being verified.
+
+    There is no ground truth at fractional n - you cannot take the maximum of
+    1.1 draws - and this is not the only defensible interpolation. Linear
+    interpolation between the integer values runs lower (0.057 against 0.085 at
+    n=1.1). Both are far above the zero that Eq. (1) implies there.
+    """
+    if n_trials == 1:
+        return 0.0
+    integrand = lambda z: z * n_trials * norm.pdf(z) * norm.cdf(z) ** (n_trials - 1)
+    return quad(integrand, -12, 12, limit=200)[0]
 
 
 @dataclass(frozen=True)
@@ -86,8 +114,6 @@ class TrialSet:
         are different numbers and both are needed: dispersion comes from the
         whole sweep, the threshold from its independent content.
         """
-        import numpy as np
-
         s = np.asarray(sharpes, dtype=float).ravel()
         if s.size < 2:
             raise ValueError("need at least 2 trial Sharpe ratios")
@@ -112,18 +138,40 @@ def expected_max_sharpe(n_trials, var_trial_sr, mean_trial_sr=0.0):
 
     `n_trials` may be fractional, since `effective_num_trials` interpolates.
 
-    Below `SMALL_N_TRIALS` this warns rather than refuses. The approximation
-    errs by overestimating, which raises the hurdle and lowers DSR, so the
-    failure is conservative - and effective counts under 50 are common once a
-    correlated sweep is collapsed, so refusing would reject the ordinary case
-    to guard against a mild error in the safe direction.
+    Two regimes, because Eq. (1) is not uniformly conservative:
+
+    Above the measured crossover at N = 2.7752, Eq. (1) overestimates - by
+    +0.036 at N=10, +0.023 at N=100 - which raises the hurdle and lowers DSR.
+    That direction is safe, so Eq. (1) is used there, and the paper's published
+    figures reproduce exactly. Between `EXACT_BRANCH_BELOW` and
+    `SMALL_N_TRIALS` this warns, since the error is largest in that band, but
+    it warns rather than refusing: effective counts under 50 are common once a
+    correlated sweep is collapsed, and the error runs in the safe direction.
+
+    Below the crossover the sign flips. At N=2 Eq. (1) UNDERSTATES by 0.044,
+    and below N=1.2836 it returns a negative correction, implying an expected
+    maximum below the mean. Understating the threshold raises DSR and makes the
+    tool permissive in exactly the regime it exists to police, so the exact
+    order statistic is integrated instead. This region is reachable, not
+    theoretical: M=100 at rho=0.98 gives N = 2.98.
+
+    The branch actually switches at `EXACT_BRANCH_BELOW` = 3.0 rather than at
+    2.7752, so the narrow band between them uses the exact form where Eq. (1)
+    would have been safe too. The two disagree by 0.0065 there, an order of
+    magnitude below Eq. (1)'s own error at any N, so the seam is left
+    unsmoothed.
     """
     if n_trials < 1:
         raise ValueError(f"n_trials must be at least 1, got {n_trials}")
     if var_trial_sr < 0:
         raise ValueError(f"var_trial_sr must be non-negative, got {var_trial_sr}")
 
-    if n_trials < SMALL_N_TRIALS and n_trials != 1:
+    # Only warn on the branch the warning is about. Below the crossover the
+    # exact integral is used, so nothing is approximated and nothing
+    # overestimates - the old message told the caller the opposite of what
+    # happened, in the very case cited as motivation (M=100 at rho=0.98 gives
+    # N=2.98).
+    if EXACT_BRANCH_BELOW <= n_trials < SMALL_N_TRIALS:
         warnings.warn(
             f"n_trials={n_trials} is below {SMALL_N_TRIALS}, where Eq. (1) is "
             f"least accurate (Appendix 2, pp. 18-19). It overestimates, so the "
@@ -131,16 +179,13 @@ def expected_max_sharpe(n_trials, var_trial_sr, mean_trial_sr=0.0):
             stacklevel=2,
         )
 
-    if n_trials < _GUMBEL_FLOOR_N:
-        # Exact at N=1, where the expected maximum of one draw is its mean.
-        # Between 1 and 1.2836 the approximation is negative, so it is floored
-        # at the mean rather than allowed to return an impossible value.
-        return mean_trial_sr
-
-    gumbel = (1 - EULER_MASCHERONI) * norm.ppf(1 - 1 / n_trials) + (
-        EULER_MASCHERONI * norm.ppf(1 - 1 / (n_trials * math.e))
-    )
-    return mean_trial_sr + math.sqrt(var_trial_sr) * gumbel
+    if n_trials < EXACT_BRANCH_BELOW:
+        z = _exact_expected_max_z(n_trials)
+    else:
+        z = (1 - EULER_MASCHERONI) * norm.ppf(1 - 1 / n_trials) + (
+            EULER_MASCHERONI * norm.ppf(1 - 1 / (n_trials * math.e))
+        )
+    return mean_trial_sr + math.sqrt(var_trial_sr) * z
 
 
 def deflated_sharpe_ratio(stats, trials):

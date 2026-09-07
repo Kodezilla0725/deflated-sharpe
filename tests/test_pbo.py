@@ -141,13 +141,45 @@ def test_logits_are_always_finite():
 def test_informationless_logits_are_logistic_not_normal():
     """p. 22 says the logits "approximate the standard Normal" here.
 
-    They approximate the standard LOGISTIC, whose standard deviation is
-    pi/sqrt(3) = 1.814, not 1. The measured spread sits below even that because
-    discrete ranks truncate both tails. It matters only if you compare the
-    observed spread against a Normal baseline, which would look far too wide.
+    They approximate the standard LOGISTIC, sd pi/sqrt(3) = 1.814, not 1.
+    Measured across seeds: 1.583 +- 0.248. Averaged, because seed 0 alone gives
+    2.030 - above the logistic, which would reverse the reading that discrete
+    ranks truncate the tails.
     """
-    sd = cscv(noise(n_trials=50), n_splits=12).logits.std()
-    assert sd > 1.2, "far wider than a standard Normal"
+    sds = np.array(
+        [cscv(noise(seed=s, n_trials=50), n_splits=12).logits.std() for s in range(8)]
+    )
+    assert sds.mean() > 1.3, "far wider than a standard Normal"
+    assert sds.mean() < 1.814, "below the logistic; discrete ranks truncate"
+    assert sds.std() > 0.1, "one draw is not enough to quote"
+
+
+def test_definition_2_2_threshold_is_off_by_one_rank():
+    """Def 2.2 (p. 10) says rbar < N/2; the logit says rbar < (N+1)/2.
+
+    Under the null the OOS rank of the IS winner is uniform on 1..N, so the
+    answer must be 0.5. Only the logit form gives it. The two agree at odd N.
+    """
+    expected = {10: (0.500, 0.400), 50: (0.500, 0.480), 100: (0.500, 0.490)}
+    for n_trials, (via_logit, via_def_2_2) in expected.items():
+        rank = np.arange(1, n_trials + 1)
+        assert (rank / (n_trials + 1) < 0.5).mean() == pytest.approx(via_logit)
+        assert (rank < n_trials / 2).mean() == pytest.approx(via_def_2_2)
+    odd = np.arange(1, 102)
+    assert (odd / 102 < 0.5).mean() == pytest.approx((odd < 101 / 2).mean())
+
+
+def test_scale_guard_is_per_column():
+    """A global scale rejects a real column whenever another is far larger."""
+    rng = np.random.default_rng(0)
+    X = np.column_stack(
+        [rng.standard_normal(200) * 1e6, rng.standard_normal(200) * 1e-9]
+    )
+    assert np.all(np.isfinite(sharpe_columns(X)))
+    assert np.all(np.isfinite(quiet(cscv, X, n_splits=8).logits))
+    X[:, 1] = 3.0
+    with pytest.raises(ValueError, match="zero variance"):
+        sharpe_columns(X)
 
 
 def test_pbo_is_the_share_of_negative_logits():

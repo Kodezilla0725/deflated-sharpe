@@ -39,11 +39,17 @@ def average_correlation(trial_returns):
     warns that rho itself may be overfit (p. 15). That concern is real, but it
     is aimed at methods that invert or decompose C; an equal-weighted average
     does neither, and each pairwise correlation still rests on T observations
-    however many columns there are. Simulation at M/T = 33 recovers a true 0.8
-    as 0.797, essentially unbiased. What degrades is the VARIANCE of the
-    estimate, and since `effective_num_trials` multiplies it by M, that noise
-    is amplified: at M=2000 a +-0.03 error in rho is +-60 trials. So this warns
-    rather than refuses, and names the dispersion rather than the bias.
+    however many columns there are.
+
+    Measured over 30 seeds at M/T = 33 (T=60, M=2000, true rho 0.8), rho comes
+    back at 0.8002 +- 0.0312: the BIAS is negligible. What degrades is the
+    DISPERSION, and `effective_num_trials` multiplies it by M. At T=50, M=1650
+    the same 30 seeds put Nhat anywhere from 218 to 457 against a true 331 -
+    a standard deviation of 57 and an observed spread of 239. Compare T=1250,
+    M=400: rho = 0.7986 +- 0.0060, Nhat 76 to 87.
+
+    So this warns rather than refuses, and the warning names the dispersion
+    rather than the bias, because the bias is not the problem.
     """
     X = np.asarray(trial_returns, dtype=float)
     if X.ndim != 2:
@@ -55,15 +61,20 @@ def average_correlation(trial_returns):
         raise ValueError("need at least 3 observations")
 
     sd = X.std(axis=0)
-    if np.any(sd <= 1e-12 * np.abs(X).max()):
+    # Per column. Against a global maximum, a genuinely varying trial is
+    # rejected whenever another trial is far larger in scale.
+    dead = sd <= 1e-12 * np.abs(X).max(axis=0)
+    if np.any(dead):
         raise ValueError(
-            "at least one trial has zero variance; its correlations are undefined"
+            f"trials {list(np.flatnonzero(dead))} have zero variance; their "
+            f"correlations are undefined"
         )
     if n_cols > n_obs:
         warnings.warn(
             f"M={n_cols} exceeds T={n_obs}; the average correlation stays "
-            f"roughly unbiased but its variance grows, and effective_num_trials "
-            f"multiplies that error by M.",
+            f"essentially unbiased but its dispersion grows sharply, and "
+            f"effective_num_trials multiplies that error by M. At M/T=33 the "
+            f"resulting Nhat spread was 218-457 against a true 331.",
             stacklevel=2,
         )
 
