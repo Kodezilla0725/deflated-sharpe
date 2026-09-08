@@ -4,8 +4,7 @@ Overfitting (Bailey and Lopez de Prado). Reusable audit tool applied across
 my other quant projects.
 
 # Conventions
-- Python 3.11. pandas, numpy, scipy, statsmodels only. No new dependencies
-  without asking me first.
+- Python 3.12. numpy and scipy only, matplotlib for figures. No new dependencies without asking me first.
 - Analysis code lives in src/ and is imported. Notebooks are for figures only.
 - Data goes in data/raw as parquet and is never committed.
 - Credentials never appear in code, notebooks, or committed files.
