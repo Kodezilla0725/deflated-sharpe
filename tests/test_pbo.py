@@ -161,13 +161,28 @@ def test_definition_2_2_threshold_is_off_by_one_rank():
     Under the null the OOS rank of the IS winner is uniform on 1..N, so the
     answer must be 0.5. Only the logit form gives it. The two agree at odd N.
     """
-    expected = {10: (0.500, 0.400), 50: (0.500, 0.480), 100: (0.500, 0.490)}
+    expected = {
+        10: (0.5000, 0.4000),
+        50: (0.5000, 0.4800),
+        100: (0.5000, 0.4900),
+        11: (0.4545, 0.4545),
+        101: (0.4950, 0.4950),
+    }
     for n_trials, (via_logit, via_def_2_2) in expected.items():
         rank = np.arange(1, n_trials + 1)
-        assert (rank / (n_trials + 1) < 0.5).mean() == pytest.approx(via_logit)
-        assert (rank < n_trials / 2).mean() == pytest.approx(via_def_2_2)
-    odd = np.arange(1, 102)
-    assert (odd / 102 < 0.5).mean() == pytest.approx((odd < 101 / 2).mean())
+        assert (rank / (n_trials + 1) < 0.5).mean() == pytest.approx(
+            via_logit, abs=5e-5
+        )
+        assert (rank < n_trials / 2).mean() == pytest.approx(via_def_2_2, abs=5e-5)
+
+    # The logit form hits 0.5 exactly only at even N. At odd N one rank lands
+    # on the median, so omega = 1/2, the logit is zero, and strict inequality
+    # excludes it, leaving (N-1)/2N.
+    for n_trials in (11, 51, 101, 999):
+        rank = np.arange(1, n_trials + 1)
+        assert (rank / (n_trials + 1) < 0.5).mean() == pytest.approx(
+            (n_trials - 1) / (2 * n_trials)
+        )
 
 
 def test_scale_guard_is_per_column():
