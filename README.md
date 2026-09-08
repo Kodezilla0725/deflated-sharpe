@@ -1,6 +1,5 @@
 ![tests](https://github.com/Kodezilla0725/deflated-sharpe/actions/workflows/test.yml/badge.svg)
 
-
 # Deflated Sharpe Ratio and Probability of Backtest Overfitting
 
 Two tests for whether a backtest survived a search or merely won one.
@@ -53,7 +52,7 @@ is what makes an independent check possible at all. Most papers do not clear
 that bar.
 
 The biggest is Finding 4.1. The PBO paper states a standard error for its own
-estimator that is about thirty times too small.
+estimator that is 31 times too small.
 
 ![phi across 25 informationless datasets](figures/phi_dispersion.png)
 
@@ -122,7 +121,7 @@ sets, and the finiteness of the logit.
 
 ## 4. Findings
 
-### 4.1 The CSCV standard error is understated by a factor of about thirty
+### 4.1 The CSCV standard error is understated by a factor of 31
 
 PBO paper, p. 22, puts the standard error of φ under **0.0045** at S=16. It
 gets there with σ = √(p(1−p)/n), where n is the number of logits. That formula
@@ -162,9 +161,9 @@ is uniform on 1..N, so that expression gives:
 | 100 | 0.500 | 0.490 |
 | 101 | 0.495 | 0.495 |
 
-Never 0.5, which is the right answer when the in-sample winner carries no
-information. What the paper actually computes is the mass of the logit
-distribution below zero. That tests `r̄/(N+1) < ½`, which gives exactly 0.5 at
+Definition 2.2 never returns 0.5, which is the right answer when the in-sample
+winner carries no information. What the paper actually computes is the mass of
+the logit distribution below zero. That tests `r̄/(N+1) < ½`, which gives exactly 0.5 at
 every even N and (N−1)/2N at odd N, as close to a half as discreteness allows.
 The odd case falls short because one rank lands exactly on the median, so
 ω̄ = ½, the logit is zero, and strict inequality excludes it.
@@ -401,7 +400,7 @@ the full out-of-sample surface so it stays reachable without recomputation.
    Probability of Backtest Overfitting.* Working paper, revised February 2015.
    SSRN [2326253](https://ssrn.com/abstract=2326253).
 3. Bailey, D. and M. López de Prado (2012). *The Sharpe Ratio Efficient
-   Frontier.* Journal of Risk 15(2). Source of the Probabilistic Sharpe Ratio
-   used in Section 5.3.
+   Frontier.* Journal of Risk 15, 3-44. Source of the Probabilistic Sharpe
+   Ratio used in Section 5.3.
 4. Lo, A. (2002). *The Statistics of Sharpe Ratios.* Financial Analysts Journal
    58(4), 36-52. Derivation of the standard error the PSR rests on.
