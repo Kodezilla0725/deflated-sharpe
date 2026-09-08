@@ -1,6 +1,7 @@
 """Tests for src.pbo."""
 
 import warnings
+from collections import Counter
 from math import comb
 
 import numpy as np
@@ -247,6 +248,53 @@ def test_performance_degradation_slope_is_negative_when_overfit():
         for s in range(12)
     ]
     assert np.mean(slopes) < 0
+
+
+def test_degradation_is_mechanical_conditional_on_the_winner():
+    """The whole misattribution argument, in one test.
+
+    Section 3.2 reads the negative IS/OOS slope as a memory effect in financial
+    series. Conditional on WHICH trial wins, the relationship is near
+    deterministic on i.i.d. noise, which has no memory at all: the two halves
+    are equal-sized complements of one fixed sample, so a column's two means
+    must sum to twice its full-sample mean - exactly, to floating point. The
+    Sharpe pair departs from a slope of -1 only through the differing standard
+    deviations of the halves.
+
+    What survives pooling across winners with different full-sample means is
+    far weaker, and its sign is not even stable across configurations. That gap
+    is the finding, and the coloured bands in figures/is_vs_oos_scatter.png are
+    the same fact drawn.
+    """
+    r = cscv(noise(n_trials=50), n_splits=10)
+    counts = Counter(r.best_trial.tolist())
+    top, wins = counts.most_common(1)[0]
+    m = r.best_trial == top
+
+    within = np.corrcoef(r.perf_is[m], r.perf_oos[m])[0, 1]
+    pooled = np.corrcoef(r.perf_is, r.perf_oos)[0, 1]
+
+    assert wins > 20, "need enough splits sharing a winner to correlate"
+    assert within < -0.9, f"within-winner should be near-deterministic, got {within}"
+    assert pooled > -0.3, f"pooled should be far weaker, got {pooled}"
+    assert abs(within) > 3 * abs(pooled)
+
+
+def test_the_complement_identity_that_drives_it():
+    """A column's two half-means sum to twice its full-sample mean, exactly."""
+    X = noise(n_obs=480, n_trials=50)
+    full = X.mean(axis=0)
+    halves = X[:240].mean(axis=0) + X[240:].mean(axis=0)
+    assert np.abs(halves - 2 * full).max() < 1e-15
+
+
+def test_a_few_columns_win_most_of_the_splits():
+    """Why the scatter bands: the winner is not redrawn each combination."""
+    r = cscv(noise(n_trials=50), n_splits=10)
+    counts = Counter(r.best_trial.tolist())
+    share = sum(n for _, n in counts.most_common(6)) / r.n_combinations
+    assert share > 0.5
+    assert len(counts) < 50
 
 
 def test_top_level_helper_matches_the_result_object():
